@@ -240,7 +240,11 @@ document.getElementById("csvFileInput").addEventListener("change", function(even
 
                 let rawTime = parseFloat((cols[timeIdx] || "0").replace(',', '.'));
                 let speed   = parseFloat((cols[speedIdx] || "0").replace(',', '.'));
-                let dist    = parseFloat((cols[distIdx] || "0").replace(',', '.'));
+                
+                // MENGHAPUS MINUS SEMU PADA JARAK MENTAH CSV
+                let dist = parseFloat((cols[distIdx] || "0").replace(',', '.'));
+                if (dist < 0) dist = 0; 
+                
                 let lat     = latIdx !== -1 ? parseFloat((cols[latIdx] || "0").replace(',', '.')) : 0;
                 let lng     = lngIdx !== -1 ? parseFloat((cols[lngIdx] || "0").replace(',', '.')) : 0;
 
@@ -278,8 +282,13 @@ function renderDashboard(timeSeries, segments) {
 
     segments.forEach((seg) => {
         let deltaDist = seg.endDist - seg.startDist;
-        if (deltaDist < 0) deltaDist = seg.endDist;
-        seg.deltaDist = deltaDist; seg.dur = seg.end - seg.start;
+        
+        // FILTER: MENCEGAH HASIL PENGURANGAN MENJADI MINUS (-)
+        if (deltaDist < 0 || Math.abs(deltaDist) < 0.001) deltaDist = 0.0; 
+        
+        seg.deltaDist = deltaDist; 
+        seg.dur = seg.end - seg.start;
+        
         if (seg.status === "THROTTLE") totalThrottle += seg.dur;
         else if (seg.status === "GELINDING") totalGliding += seg.dur;
         else if (seg.status === "BERHENTI") totalStop += seg.dur;
@@ -289,7 +298,10 @@ function renderDashboard(timeSeries, segments) {
     function formatTime(s) { return `${String(Math.floor(s/3600)).padStart(2,'0')}:${String(Math.floor((s%3600)/60)).padStart(2,'0')}:${String(Math.floor(s%60)).padStart(2,'0')}`; }
 
     const globalTopSpeed = Math.max(...timeSeries.map(d => d.speed));
-    const finalDistance = timeSeries[timeSeries.length - 1].dist;
+    let finalDistance = timeSeries[timeSeries.length - 1].dist;
+    
+    // Pastikan final distance juga tidak pernah minus
+    if (finalDistance < 0) finalDistance = 0;
 
     document.getElementById("totalThrottle").innerText   = formatTime(totalThrottle);
     document.getElementById("totalGliding").innerText    = formatTime(totalGliding);

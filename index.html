@@ -47,12 +47,20 @@ html, body {
     display: flex; flex-direction: column; gap: 6px; border: 1px solid rgba(255,255,255,0.03);
 }
 .summary-card h3 { font-size: 11px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.06em; }
-.summary-card span { font-size: 22px; font-weight: 700; color: #38bdf8; }
-.summary-card.throttle span { color: #ef4444; }
-.summary-card.gliding span { color: #22c55e; }
-.summary-card.percent span { color: #facc15; }
-.summary-card.distance span { color: #a855f7; }
-.summary-card.speed span { color: #f97316; }
+.summary-card > span { font-size: 22px; font-weight: 700; color: #38bdf8; }
+.summary-card.throttle > span { color: #ef4444; }
+.summary-card.gliding > span { color: #22c55e; }
+.summary-card.percent > span { color: #facc15; }
+.summary-card.distance > span { color: #a855f7; }
+
+/* Style Khusus untuk Kotak Statistik Kecepatan */
+.speed-stats-container { display: flex; justify-content: space-between; margin-top: 5px; gap: 10px;}
+.speed-stat-box { display: flex; flex-direction: column; }
+.speed-stat-label { font-size: 10px; color: #64748b; font-weight: 700; letter-spacing: 0.05em; margin-bottom: 2px;}
+.speed-stat-val { font-size: 16px; font-weight: 700; }
+.val-max { color: #f97316; }
+.val-avg { color: #38bdf8; }
+.val-min { color: #cbd5e1; }
 
 /* ===== LEGEND ===== */
 .legend-row { display: flex; gap: 20px; padding: 0 32px 12px; align-items: center; flex-wrap: wrap; }
@@ -152,7 +160,7 @@ input[type=range]::-webkit-slider-runnable-track {
 <div id="loadingOverlay">
     <div class="spinner"></div>
     <h2 style="letter-spacing: 2px;">MEMPROSES DATA TELEMETRI...</h2>
-    <p style="color: #94a3b8; margin-top: 10px; font-size: 14px;" id="loadingText">Melakukan Integrasi Jarak & Rute Log Nogogeni...</p>
+    <p style="color: #94a3b8; margin-top: 10px; font-size: 14px;" id="loadingText">Menghitung Fusi Data & Koreksi Lag Filter...</p>
 </div>
 
 <nav class="logger-navbar"><div class="nav-left"><span class="back-btn">NOGOGENI TELEMETRY ENGINE</span></div></nav>
@@ -174,8 +182,26 @@ input[type=range]::-webkit-slider-runnable-track {
         <div class="summary-card throttle"><h3>Total Throttle</h3><span id="totalThrottle">00:00:00</span></div>
         <div class="summary-card gliding"><h3>Total Gliding</h3><span id="totalGliding">00:00:00</span></div>
         <div class="summary-card percent"><h3>Throttle %</h3><span id="throttlePercent">0%</span></div>
-        <div class="summary-card distance"><h3>Total Jarak Tempuh (Integral)</h3><span id="totalDistance">0.0 km</span></div>
-        <div class="summary-card speed"><h3>Top Speed Max</h3><span id="topSpeed">0.0 km/h</span></div>
+        <div class="summary-card distance"><h3>Jarak Tempuh</h3><span id="totalDistance">0.0 km</span></div>
+        
+        <!-- KOTAK STATISTIK KECEPATAN BARU -->
+        <div class="summary-card">
+            <h3 title="Min dihitung dari batas masuk tikungan sebelum di-gas kembali (Mulai dari Throttle Ke-2)">Statistik Kecepatan (km/h) 🛈</h3>
+            <div class="speed-stats-container">
+                <div class="speed-stat-box">
+                    <span class="speed-stat-label">MAX</span>
+                    <span class="speed-stat-val val-max" id="speedMax">0.0</span>
+                </div>
+                <div class="speed-stat-box">
+                    <span class="speed-stat-label">AVG</span>
+                    <span class="speed-stat-val val-avg" id="speedAvg">0.0</span>
+                </div>
+                <div class="speed-stat-box">
+                    <span class="speed-stat-label" title="Lowest speed before re-throttle">MIN (Corner)</span>
+                    <span class="speed-stat-val val-min" id="speedMin">0.0</span>
+                </div>
+            </div>
+        </div>
     </section>
 
     <div class="chart-wrapper" id="playbackWrapper">
@@ -267,7 +293,7 @@ document.getElementById("csvFileInput").addEventListener("change", function(even
     if (!file) return;
 
     document.getElementById("loadingOverlay").style.display = "flex";
-    document.getElementById("loadingText").innerText = "Membaca & Mengkalkulasi Integral CSV...";
+    document.getElementById("loadingText").innerText = "Menghitung Fusi Data & Koreksi Lag Filter...";
 
     setTimeout(() => {
         const reader = new FileReader();
@@ -324,8 +350,24 @@ document.getElementById("csvFileInput").addEventListener("change", function(even
                 }
             }
 
+            // Normalisasi Waktu Mulai ke 0
             let baseTime = rawTimeSeries[0].time;
             rawTimeSeries.forEach(d => { d.time = d.time - baseTime; });
+
+            // ==============================================================
+            // ALGORITMA KOREKSI LAG FILTER (POST-PROCESSING KALMAN/GPS DELAY)
+            // Memperpanjang fase THROTTLE jika kecepatan masih terus naik
+            // ==============================================================
+            for (let i = 1; i < rawTimeSeries.length; i++) {
+                if (rawTimeSeries[i - 1].status === "THROTTLE" && rawTimeSeries[i].status === "GELINDING") {
+                    let j = i;
+                    // Terus ubah jadi THROTTLE selama kecepatan masih mendaki ke puncak
+                    while (j < rawTimeSeries.length && rawTimeSeries[j].speed >= rawTimeSeries[j - 1].speed && rawTimeSeries[j].status === "GELINDING") {
+                        rawTimeSeries[j].status = "THROTTLE";
+                        j++;
+                    }
+                }
+            }
 
             mergedSegments = []; let currentPhase = null;
             rawTimeSeries.forEach(d => {
@@ -361,16 +403,40 @@ function renderDashboard(timeSeries, segments) {
     const totalActive = totalThrottle + totalGliding + totalStop;
     function formatTime(s) { return `${String(Math.floor(s/3600)).padStart(2,'0')}:${String(Math.floor((s%3600)/60)).padStart(2,'0')}:${String(Math.floor(s%60)).padStart(2,'0')}`; }
 
-    const globalTopSpeed = Math.max(...timeSeries.map(d => d.speed));
+    // --- KALKULASI STATISTIK KECEPATAN ---
+    const allSpeeds = timeSeries.map(d => d.speed);
+    const maxSpeed = Math.max(...allSpeeds);
+    const avgSpeed = allSpeeds.reduce((sum, val) => sum + val, 0) / allSpeeds.length;
+
+    // --- MENCARI MIN SPEED (CORNERING SPEED SEBELUM DI-GAS) ---
+    let preThrottleSpeeds = [];
+    let throttleCount = 0;
+
+    for (let i = 1; i < timeSeries.length; i++) {
+        // Mendeteksi momen transisi ke THROTTLE
+        if (timeSeries[i - 1].status !== "THROTTLE" && timeSeries[i].status === "THROTTLE") {
+            throttleCount++;
+            // Abaikan throttle pertama (tarikan awal & ganti gigi)
+            if (throttleCount > 1) { 
+                preThrottleSpeeds.push(timeSeries[i - 1].speed); // Catat kecepatan tepat sebelum di-gas ulang
+            }
+        }
+    }
+    const minCornerSpeed = preThrottleSpeeds.length > 0 ? Math.min(...preThrottleSpeeds) : 0;
+
     let finalDistance = timeSeries[timeSeries.length - 1].dist;
-    
     if (finalDistance < 0) finalDistance = 0;
 
+    // --- POPULATE UI KOTAK RINGKASAN ---
     document.getElementById("totalThrottle").innerText   = formatTime(totalThrottle);
     document.getElementById("totalGliding").innerText    = formatTime(totalGliding);
     document.getElementById("throttlePercent").innerText = totalActive > 0 ? ((totalThrottle / totalActive) * 100).toFixed(1) + "%" : "0%";
     document.getElementById("totalDistance").innerText   = (finalDistance / 1000).toFixed(2) + " km";
-    document.getElementById("topSpeed").innerText        = globalTopSpeed.toFixed(1) + " km/h";
+    
+    // Inject Statistik Kecepatan
+    document.getElementById("speedMax").innerText = maxSpeed.toFixed(1);
+    document.getElementById("speedAvg").innerText = avgSpeed.toFixed(1);
+    document.getElementById("speedMin").innerText = minCornerSpeed.toFixed(1);
 
     const tbody = document.getElementById("segmentBody"); let tableHTML = "";
     segments.slice(0, 300).forEach((seg, i) => {
@@ -455,7 +521,7 @@ function initPlayback(ts) {
 
 function stepPlayback(direction) {
     if (!globalTimeSeries || globalTimeSeries.length === 0) return;
-    if (isPlaying) togglePlay(); // Otomatis pause jika user menavigasi manual
+    if (isPlaying) togglePlay(); 
     
     const slider = document.getElementById("playbackSlider");
     let val = parseInt(slider.value) + direction;
@@ -467,7 +533,6 @@ function stepPlayback(direction) {
     updatePlaybackUI(val);
 }
 
-// Event Listeners Navigasi Baru
 document.getElementById("stepBackBtn").addEventListener("click", () => stepPlayback(-1));
 document.getElementById("stepFwdBtn").addEventListener("click", () => stepPlayback(1));
 
@@ -478,19 +543,18 @@ document.getElementById("playbackSlider").addEventListener("input", (e) => {
 
 document.getElementById("playPauseBtn").addEventListener("click", togglePlay);
 
-// Global Keyboard Shortcuts (Kiri, Kanan, Spasi)
 document.addEventListener("keydown", (e) => {
     if (!globalTimeSeries || globalTimeSeries.length === 0) return;
     
     if (e.key === "ArrowLeft") {
         stepPlayback(-1);
-        e.preventDefault(); // Cegah layar scrolling
+        e.preventDefault(); 
     } else if (e.key === "ArrowRight") {
         stepPlayback(1);
-        e.preventDefault(); // Cegah layar scrolling
+        e.preventDefault(); 
     } else if (e.key === " " || e.code === "Space") {
         togglePlay();
-        e.preventDefault(); // Cegah halaman lompat ke bawah
+        e.preventDefault(); 
     }
 });
 
@@ -513,7 +577,7 @@ function togglePlay() {
                 togglePlay();
                 return;
             }
-            let nextVal = val + 2; // Maju 2 frame per 25ms (Cepat)
+            let nextVal = val + 2; 
             if(nextVal > globalTimeSeries.length - 1) nextVal = globalTimeSeries.length - 1;
             
             slider.value = nextVal;
@@ -530,13 +594,11 @@ function updatePlaybackUI(index) {
     if(!globalTimeSeries[index]) return;
     let d = globalTimeSeries[index];
     
-    // Update Teks Live Status
     document.getElementById("playbackTime").innerText = d.time.toFixed(1) + "s";
     
     let colorStatus = d.status === "THROTTLE" ? "#ef4444" : (d.status === "GELINDING" ? "#22c55e" : "#94a3b8");
     document.getElementById("livePlayStats").innerHTML = `Speed: <span style="color:#f1f5f9">${d.speed.toFixed(1)}</span> km/h &nbsp;|&nbsp; Dist: <span style="color:#f1f5f9">${d.dist.toFixed(1)}</span> m &nbsp;|&nbsp; Status: <span style="color:${colorStatus}">${d.status}</span>`;
     
-    // Update Posisi Mobil di Peta
     if(loggerMap && d.lat && d.lng && d.lat !== 0 && d.lng !== 0) {
         if(!carMarker) {
             carMarker = L.circleMarker([d.lat, d.lng], { color: '#000', weight: 3, fillColor: '#facc15', fillOpacity: 1, radius: 9, zIndexOffset: 1000 }).bindTooltip("POSISI DRIVER", {permanent: false}).addTo(loggerMap);
@@ -546,16 +608,36 @@ function updatePlaybackUI(index) {
     }
 }
 
-// ===== EVENT LISTENER CHART =====
 document.getElementById("btnZoomIn").addEventListener("click", () => { if(timelineChartInstance) timelineChartInstance.zoom(1.3); if(speedChartInstance) speedChartInstance.zoom(1.3); });
 document.getElementById("btnZoomOut").addEventListener("click", () => { if(timelineChartInstance) timelineChartInstance.zoom(0.77); if(speedChartInstance) speedChartInstance.zoom(0.77); });
 document.getElementById("btnResetZoom").addEventListener("click", () => { if(timelineChartInstance) timelineChartInstance.resetZoom(); if(speedChartInstance) speedChartInstance.resetZoom(); });
 
 document.getElementById("btnExportCSV").addEventListener("click", () => {
     if (mergedSegments.length === 0) return;
+    
     let csv = "Fase Ke-;Status;Mulai (s);Selesai (s);Durasi (s);Jarak Fase (m);Top Speed (km/h)\n";
-    mergedSegments.forEach((seg, i) => { csv += `${i+1};${seg.status};${seg.start.toFixed(2)};${seg.end.toFixed(2)};${seg.dur.toFixed(2)};${seg.deltaDist.toFixed(2)};${seg.maxSpeed.toFixed(2)}\n`; });
-    const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" })); a.download = "nogogeni_analisis_fase.csv"; a.click();
+    mergedSegments.forEach((seg, i) => { 
+        csv += `${i+1};${seg.status};${seg.start.toFixed(2)};${seg.end.toFixed(2)};${seg.dur.toFixed(2)};${seg.deltaDist.toFixed(2)};${seg.maxSpeed.toFixed(2)}\n`; 
+    });
+    
+    const a = document.createElement("a"); 
+    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" })); 
+    
+    // --- FORMAT WAKTU YYYY-MM-DD_HH-MM-SS ---
+    let now = new Date();
+    let yyyy = now.getFullYear();
+    let mm = String(now.getMonth() + 1).padStart(2, '0'); // Bulan dimulai dari 0
+    let dd = String(now.getDate()).padStart(2, '0');
+    let hh = String(now.getHours()).padStart(2, '0');
+    let min = String(now.getMinutes()).padStart(2, '0');
+    let sec = String(now.getSeconds()).padStart(2, '0');
+    
+    let timestamp = `${yyyy}-${mm}-${dd}_${hh}-${min}-${sec}`;
+    
+    // Hasil nama file: nogogeni_analisis_fase_2026-04-29_20-24-24.csv
+    a.download = `nogogeni_analisis_fase_${timestamp}.csv`; 
+    
+    a.click();
 });
 </script>
 

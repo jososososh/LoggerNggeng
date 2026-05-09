@@ -88,7 +88,7 @@ html, body {
 .canvas-container.map-chart { height: 400px; padding: 0; }
 
 .leaflet-layer, .leaflet-control-zoom-in, .leaflet-control-zoom-out, .leaflet-control-attribution {
-  filter: invert(100%) hue-rotate(180deg) brightness(95%) contrast(90%);
+    filter: invert(100%) hue-rotate(180deg) brightness(95%) contrast(90%);
 }
 
 /* ===== SEGMENT TABLE ===== */
@@ -160,7 +160,7 @@ input[type=range]::-webkit-slider-runnable-track {
 <div id="loadingOverlay">
     <div class="spinner"></div>
     <h2 style="letter-spacing: 2px;">MEMPROSES DATA TELEMETRI...</h2>
-    <p style="color: #94a3b8; margin-top: 10px; font-size: 14px;" id="loadingText">Menghitung Fusi Data & Koreksi Lag Filter...</p>
+    <p style="color: #94a3b8; margin-top: 10px; font-size: 14px;" id="loadingText">Membaca Data Jarak & Fusi Filter...</p>
 </div>
 
 <nav class="logger-navbar"><div class="nav-left"><span class="back-btn">NOGOGENI TELEMETRY ENGINE</span></div></nav>
@@ -182,9 +182,8 @@ input[type=range]::-webkit-slider-runnable-track {
         <div class="summary-card throttle"><h3>Total Throttle</h3><span id="totalThrottle">00:00:00</span></div>
         <div class="summary-card gliding"><h3>Total Gliding</h3><span id="totalGliding">00:00:00</span></div>
         <div class="summary-card percent"><h3>Throttle %</h3><span id="throttlePercent">0%</span></div>
-        <div class="summary-card distance"><h3>Jarak Tempuh</h3><span id="totalDistance">0.0 km</span></div>
+        <div class="summary-card distance"><h3>Jarak Tempuh</h3><span id="totalDistance">0.00 km</span></div>
         
-        <!-- KOTAK STATISTIK KECEPATAN BARU -->
         <div class="summary-card">
             <h3 title="Min dihitung dari batas masuk tikungan sebelum di-gas kembali (Mulai dari Throttle Ke-2)">Statistik Kecepatan (km/h) 🛈</h3>
             <div class="speed-stats-container">
@@ -276,13 +275,11 @@ let timelineChartInstance = null;
 let speedChartInstance = null;
 let mergedSegments = [];
 
-// Variabel Peta Global
 let loggerMap = null;
 let mapPolylines = [];
 let startMarker = null;
 let endMarker = null;
 
-// Variabel Playback
 let playbackInterval = null;
 let isPlaying = false;
 let globalTimeSeries = [];
@@ -293,7 +290,7 @@ document.getElementById("csvFileInput").addEventListener("change", function(even
     if (!file) return;
 
     document.getElementById("loadingOverlay").style.display = "flex";
-    document.getElementById("loadingText").innerText = "Menghitung Fusi Data & Koreksi Lag Filter...";
+    document.getElementById("loadingText").innerText = "Mengekstrak Jarak dari Log...";
 
     setTimeout(() => {
         const reader = new FileReader();
@@ -310,6 +307,7 @@ document.getElementById("csvFileInput").addEventListener("change", function(even
 
             let timeIdx   = headers.findIndex(h => h === 'TIME(S)' || h === 'TIME' || h === 'WAKTU');
             let speedIdx  = headers.findIndex(h => h === 'SPEED(KM/H)' || h === 'SPEED' || h === 'KECEPATAN');
+            let distIdx   = headers.findIndex(h => h === 'DISTANCE(M)' || h === 'DISTANCE' || h === 'DIST' || h === 'JARAK'); // BACA KOLOM DISTANCE
             let latIdx    = headers.findIndex(h => h === 'LAT');
             let lngIdx    = headers.findIndex(h => h === 'LNG');
             let statusIdx = headers.findIndex(h => h === 'STATUS');
@@ -330,6 +328,19 @@ document.getElementById("csvFileInput").addEventListener("change", function(even
                 
                 let lat     = latIdx !== -1 ? parseFloat((cols[latIdx] || "0").replace(',', '.')) : 0;
                 let lng     = lngIdx !== -1 ? parseFloat((cols[lngIdx] || "0").replace(',', '.')) : 0;
+                
+                // === LOGIKA BARU: PRIORITASKAN JARAK ASLI DARI CSV ===
+                let dist = 0;
+                if (distIdx !== -1 && !isNaN(parseFloat((cols[distIdx] || "0").replace(',', '.')))) {
+                    dist = parseFloat((cols[distIdx] || "0").replace(',', '.'));
+                } else {
+                    // Fallback integral kalau CSV-nya ga punya kolom distance
+                    let dt = rawTime - prevTimeForDist;
+                    if(dt < 0) dt = 0;
+                    cumulativeIntegratedDist += (speed / 3.6) * dt;
+                    dist = cumulativeIntegratedDist;
+                }
+                prevTimeForDist = rawTime;
 
                 let rawStatus = (cols[statusIdx] || "").toUpperCase();
                 let status = "BERHENTI";
@@ -337,31 +348,17 @@ document.getElementById("csvFileInput").addEventListener("change", function(even
                 else if (rawStatus.includes("GELINDING")) status = "GELINDING";
 
                 if (!isNaN(rawTime) && !isNaN(speed)) {
-                    if (rawTimeSeries.length === 0) prevTimeForDist = rawTime;
-                    
-                    let dt = rawTime - prevTimeForDist;
-                    if(dt < 0) dt = 0;
-                    
-                    let distStep = (speed / 3.6) * dt; 
-                    cumulativeIntegratedDist += distStep;
-                    prevTimeForDist = rawTime;
-
-                    rawTimeSeries.push({ time: rawTime, speed, dist: cumulativeIntegratedDist, status, lat, lng });
+                    rawTimeSeries.push({ time: rawTime, speed, dist: dist, status, lat, lng });
                 }
             }
 
-            // Normalisasi Waktu Mulai ke 0
             let baseTime = rawTimeSeries[0].time;
             rawTimeSeries.forEach(d => { d.time = d.time - baseTime; });
 
-            // ==============================================================
-            // ALGORITMA KOREKSI LAG FILTER (POST-PROCESSING KALMAN/GPS DELAY)
-            // Memperpanjang fase THROTTLE jika kecepatan masih terus naik
-            // ==============================================================
+            // Post-Processing Phase Correction
             for (let i = 1; i < rawTimeSeries.length; i++) {
                 if (rawTimeSeries[i - 1].status === "THROTTLE" && rawTimeSeries[i].status === "GELINDING") {
                     let j = i;
-                    // Terus ubah jadi THROTTLE selama kecepatan masih mendaki ke puncak
                     while (j < rawTimeSeries.length && rawTimeSeries[j].speed >= rawTimeSeries[j - 1].speed && rawTimeSeries[j].status === "GELINDING") {
                         rawTimeSeries[j].status = "THROTTLE";
                         j++;
@@ -403,22 +400,18 @@ function renderDashboard(timeSeries, segments) {
     const totalActive = totalThrottle + totalGliding + totalStop;
     function formatTime(s) { return `${String(Math.floor(s/3600)).padStart(2,'0')}:${String(Math.floor((s%3600)/60)).padStart(2,'0')}:${String(Math.floor(s%60)).padStart(2,'0')}`; }
 
-    // --- KALKULASI STATISTIK KECEPATAN ---
     const allSpeeds = timeSeries.map(d => d.speed);
     const maxSpeed = Math.max(...allSpeeds);
     const avgSpeed = allSpeeds.reduce((sum, val) => sum + val, 0) / allSpeeds.length;
 
-    // --- MENCARI MIN SPEED (CORNERING SPEED SEBELUM DI-GAS) ---
     let preThrottleSpeeds = [];
     let throttleCount = 0;
 
     for (let i = 1; i < timeSeries.length; i++) {
-        // Mendeteksi momen transisi ke THROTTLE
         if (timeSeries[i - 1].status !== "THROTTLE" && timeSeries[i].status === "THROTTLE") {
             throttleCount++;
-            // Abaikan throttle pertama (tarikan awal & ganti gigi)
             if (throttleCount > 1) { 
-                preThrottleSpeeds.push(timeSeries[i - 1].speed); // Catat kecepatan tepat sebelum di-gas ulang
+                preThrottleSpeeds.push(timeSeries[i - 1].speed); 
             }
         }
     }
@@ -431,9 +424,10 @@ function renderDashboard(timeSeries, segments) {
     document.getElementById("totalThrottle").innerText   = formatTime(totalThrottle);
     document.getElementById("totalGliding").innerText    = formatTime(totalGliding);
     document.getElementById("throttlePercent").innerText = totalActive > 0 ? ((totalThrottle / totalActive) * 100).toFixed(1) + "%" : "0%";
-    document.getElementById("totalDistance").innerText   = (finalDistance / 1000).toFixed(2) + " km";
     
-    // Inject Statistik Kecepatan
+    // Nampilin jarak tempuh jadi 3 angka di belakang koma (misal: 1.553 km) agar lebih akurat
+    document.getElementById("totalDistance").innerText   = (finalDistance / 1000).toFixed(3) + " km";
+    
     document.getElementById("speedMax").innerText = maxSpeed.toFixed(1);
     document.getElementById("speedAvg").innerText = avgSpeed.toFixed(1);
     document.getElementById("speedMin").innerText = minCornerSpeed.toFixed(1);
@@ -449,7 +443,6 @@ function renderDashboard(timeSeries, segments) {
     document.getElementById("emptyState").style.display = "none";
     document.getElementById("dashboardContent").style.display = "block";
 
-    // ===== CHART =====
     if (timelineChartInstance) timelineChartInstance.destroy();
     if (speedChartInstance) speedChartInstance.destroy();
 
@@ -471,7 +464,6 @@ function renderDashboard(timeSeries, segments) {
         options: { responsive: true, maintainAspectRatio: false, animation: false, interaction: { mode: 'index', intersect: false }, scales: { x: { type: "linear", min: 0, max: maxTime, grid: { color: "rgba(255,255,255,0.05)" }, ticks: { color: "#64748b" } }, y: { grid: { color: "rgba(255,255,255,0.05)" }, ticks: { color: "#64748b" }, beginAtZero: true } }, plugins: { legend: { display: false }, tooltip: { backgroundColor: "#1e293b", titleColor: "#38bdf8", bodyColor: "#e2e8f0", callbacks: { label: ctx => [ ` 🚀 Speed : ${ctx.parsed.y.toFixed(1)} km/h`, ` 🚥 Fase   : ${ctx.raw.status}` ] } }, zoom: { limits: { x: { min: 0, max: maxTime, minRange: 1 } }, pan: { enabled: true, mode: "x" }, zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: "x" } } } }
     });
 
-    // PETA MULTI-COLOR
     if (!loggerMap) {
         loggerMap = L.map('loggerMap').setView([-7.2823, 112.7949], 16);
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(loggerMap);
@@ -508,9 +500,6 @@ function renderDashboard(timeSeries, segments) {
     }
 }
 
-// ===============================================
-// SISTEM PLAYBACK (PRESISI TINGGI)
-// ===============================================
 function initPlayback(ts) {
     globalTimeSeries = ts;
     const slider = document.getElementById("playbackSlider");
@@ -623,10 +612,9 @@ document.getElementById("btnExportCSV").addEventListener("click", () => {
     const a = document.createElement("a"); 
     a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" })); 
     
-    // --- FORMAT WAKTU YYYY-MM-DD_HH-MM-SS ---
     let now = new Date();
     let yyyy = now.getFullYear();
-    let mm = String(now.getMonth() + 1).padStart(2, '0'); // Bulan dimulai dari 0
+    let mm = String(now.getMonth() + 1).padStart(2, '0');
     let dd = String(now.getDate()).padStart(2, '0');
     let hh = String(now.getHours()).padStart(2, '0');
     let min = String(now.getMinutes()).padStart(2, '0');
@@ -634,7 +622,6 @@ document.getElementById("btnExportCSV").addEventListener("click", () => {
     
     let timestamp = `${yyyy}-${mm}-${dd}_${hh}-${min}-${sec}`;
     
-    // Hasil nama file: nogogeni_analisis_fase_2026-04-29_20-24-24.csv
     a.download = `nogogeni_analisis_fase_${timestamp}.csv`; 
     
     a.click();
